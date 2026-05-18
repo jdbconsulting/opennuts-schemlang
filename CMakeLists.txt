@@ -39,6 +39,11 @@ endif()
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
+# Standard install path conventions (bin/, share/doc/<project>/, etc.).
+# Needed so ``cmake --install`` can stage a relocatable tree for the
+# release tarballs produced by .github/workflows/release.yml.
+include(GNUInstallDirs)
+
 # ---------------------------------------------------------------------------
 # Targets and options.
 # ---------------------------------------------------------------------------
@@ -117,6 +122,20 @@ if(SCHEMLANG_BUILD_CLI)
             -Wno-missing-field-initializers
         )
     endif()
+
+    # Install rules for the native CLI / LSP. ``cmake --install`` stages
+    # the binary, the project README and the docs/ tree into the
+    # configured prefix so release.yml can tar/zip a single self-
+    # describing artifact per platform.
+    install(TARGETS schemlang
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+    install(FILES README.md
+        DESTINATION ${CMAKE_INSTALL_DOCDIR}
+    )
+    install(DIRECTORY docs/
+        DESTINATION ${CMAKE_INSTALL_DOCDIR}/docs
+    )
 endif()
 
 # ---------------------------------------------------------------------------

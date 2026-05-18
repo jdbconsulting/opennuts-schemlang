@@ -1,0 +1,214 @@
+name: Build and Release
+
+# Pushing a ``vX.Y.Z`` tag triggers a full multi-platform build that
+# uploads native CLI tarballs (Linux x86_64, macOS arm64, macOS x86_64,
+# Windows x86_64) and the WASM bundle (schemlang_wasm.{js,wasm}) as
+# assets on a GitHub Release named after the tag.
+#
+# ``workflow_dispatch`` allows manual runs (for verifying the matrix
+# without cutting a release): in that mode the artifacts are still
+# uploaded as workflow artifacts but no Release is created.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ===================================================================
+  # Native CLI matrix.
+  #
+  # Each job builds the schemlang CLI / LSP in Release mode, runs the
+  # example corpus through ``--check`` as a smoke test, then ``cmake
+  # --install``s into a staging prefix that is tarred / zipped and
+  # uploaded.
+  # ===================================================================
+  build-native:
+    name: Native ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner:   ubuntu-latest
+            archive:  tar.gz
+          - platform: macos-arm64
+            runner:   macos-latest
+            archive:  tar.gz
+          - platform: macos-x86_64
+            runner:   macos-13
+            archive:  tar.gz
+          - platform: windows-x86_64
+            runner:   windows-latest
+            archive:  zip
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=install \
+            -DSCHEMLANG_BUILD_CLI=ON \
+            -DSCHEMLANG_BUILD_WASM=OFF
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release -j
+
+      - name: Test
+        # opennuts-schemlang has no CTest harness yet; run the same
+        # corpus-check loop the README ships as "Quick sanity check"
+        # so the matrix won't ship a binary that can't parse its own
+        # examples.
+        shell: bash
+        run: |
+          set -e
+          binary=build/bin/schemlang
+          if [[ "${{ matrix.platform }}" == windows-* ]]; then
+              binary="build/bin/Release/schemlang.exe"
+          fi
+          fail=0
+          shopt -s nullglob
+          for f in examples/std/*.schemlang examples/parts/*.schemlang examples/boards/*.schemlang; do
+              if ! "$binary" --check "$f" > /tmp/out 2>&1; then
+                  echo "::error file=$f::syntax check failed"
+                  cat /tmp/out
+                  fail=1
+              fi
+          done
+          test "$fail" = 0
+
+      - name: Install (stage)
+        shell: bash
+        run: cmake --install build --prefix install --config Release
+
+      - name: Determine version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          name="opennuts-schemlang-${{ steps.ver.outputs.version }}-${{ matrix.platform }}"
+          mkdir -p dist
+          tar -czf "dist/${name}.tar.gz" -C install .
+          (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: bash
+        run: |
+          name="opennuts-schemlang-${{ steps.ver.outputs.version }}-${{ matrix.platform }}"
+          mkdir -p dist
+          # Use 7z so Windows runners can produce zips reliably.
+          7z a "dist/${name}.zip" "./install/*"
+          # certutil ships with Windows; produce the same hash format
+          # as sha256sum for parity with the *nix jobs.
+          certutil -hashfile "dist/${name}.zip" SHA256 \
+            | grep -v ':' | tr -d '\r\n ' > "dist/${name}.zip.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opennuts-schemlang-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ===================================================================
+  # WASM build (emscripten).
+  #
+  # Emits ``build-wasm/bin/schemlang_wasm.js`` and ``schemlang_wasm.wasm``
+  # which are the two files opennuts-app's ``copy-wasm.js`` stages.
+  # ===================================================================
+  build-wasm:
+    name: WASM (emscripten)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup emsdk
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: latest
+          actions-cache-folder: emsdk-cache
+
+      - name: Configure (emcmake)
+        run: emcmake cmake -S . -B build-wasm -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-wasm -j
+
+      - name: Determine version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package
+        run: |
+          name="opennuts-schemlang-${{ steps.ver.outputs.version }}-wasm"
+          mkdir -p dist "stage/${name}"
+          cp build-wasm/bin/schemlang_wasm.js   "stage/${name}/"
+          cp build-wasm/bin/schemlang_wasm.wasm "stage/${name}/"
+          # Ship a manifest so consumers can verify they got matching
+          # .js / .wasm pairs from the same build.
+          (cd "stage/${name}" && sha256sum schemlang_wasm.js schemlang_wasm.wasm > SHA256SUMS)
+          tar -czf "dist/${name}.tar.gz" -C stage "${name}"
+          (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opennuts-schemlang-wasm
+          path: dist/*
+          if-no-files-found: error
+
+  # ===================================================================
+  # Publish: only on tag pushes. Collects every matrix artifact and
+  # attaches them to a single GitHub Release named after the tag.
+  # ===================================================================
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-native, build-wasm]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifact layout
+        run: |
+          mkdir -p release-assets
+          # Each upload-artifact creates its own subdirectory. Pull
+          # everything into one flat folder for the Release action.
+          find artifacts -type f -exec mv {} release-assets/ \;
+          ls -lh release-assets
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
