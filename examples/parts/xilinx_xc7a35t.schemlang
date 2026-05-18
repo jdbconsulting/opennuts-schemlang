@@ -1,0 +1,202 @@
+# parts/xilinx_xc7a35t.schemlang
+#
+# Xilinx Artix-7 (XC7A35T-1CSG324C) entry illustrating the
+# constraint-driven model on an FPGA:
+#
+#   * banks with finite-domain `Vio` constraint variables, not
+#     pre-bound voltages -- the solver picks each bank's Vio
+#     subject to the buses landing on it;
+#   * a shared digital_io pool;
+#   * `provides` factories for <I2C>, <SPI>, <UART> that draw lanes
+#     from the pool subject to per-bus where-clauses (lanes share
+#     a bank);
+#   * a `vio_port` per bank that publishes the bank's voltage to
+#     wrappers via `derive` rules on the `provides` declarations.
+#
+# A real CSG324 has roughly 210 user I/O across four banks; only
+# enough pins per bank are listed to demonstrate the shape.
+
+include "std/power.schemlang"
+include "std/spi.schemlang"   only { SPI }
+include "std/i2c.schemlang"   only { I2C }
+include "std/uart.schemlang"  only { UART }
+
+
+define [CSG324]
+  # 324-ball CSP, 18x18 grid. Pad geometry is library-defined.
+  generate for col in { A, B, C, D, E, F, G, H, J, K, L, M, N, P, R, T, U, V }
+    generate for row in 1 .. 18
+      pin "${col}${row}"
+
+
+define {XC7A35T}
+  description       "IC FPGA XILINX ARTIX-7 33K-LC CSG324"
+  designator_prefix U
+
+  # Every parameter is justified by an elaborator check.
+
+  [CSG324]
+    # Power. Real part has many VCCINT/VCCAUX/VCCO_n/GND balls; a
+    # handful per rail demonstrates the shape.
+    pin J9    VCCINT      role power_in
+      parameter Vmin     : voltage = 0.95 V
+      parameter Vmax     : voltage = 1.05 V
+      parameter Vmax_abs : voltage = 1.10 V       # destruction (per DS abs-max)
+      constraint net.V in [Vmin, Vmax]
+      constraint net.V.Vhi <= Vmax_abs
+    pin J10   VCCAUX      role power_in
+      parameter Vmin     : voltage = 1.71 V
+      parameter Vmax     : voltage = 1.89 V
+      parameter Vmax_abs : voltage = 2.00 V
+      constraint net.V in [Vmin, Vmax]
+      constraint net.V.Vhi <= Vmax_abs
+    pin J11   GND         role ground
+
+    # VCCO_n: each I/O bank has its own supply. Vio is a constraint
+    # variable owned by the bank; the constraint here ties the pin's
+    # net voltage to that variable, then the operating-window /
+    # destruction-threshold checks discharge against the bank's
+    # interval. Vio inherits the rail's tolerance interval, so a
+    # 3.3 V +/- 3 % rail will be flagged against a part with
+    # Vmax = 3.3 V even though "3.3 == 3.3" -- see Recipe 6.
+    pin H14   VCCO_14     role power_in
+      parameter Vmin     : voltage = 1.14 V
+      parameter Vmax     : voltage = 3.465 V       # 3.3 V + 5 % corner
+      parameter Vmax_abs : voltage = 3.60 V        # destruction
+      constraint net.V == bank_14.Vio
+      constraint net.V in [Vmin, Vmax]
+      constraint net.V.Vhi <= Vmax_abs
+    pin H15   VCCO_15     role power_in
+      parameter Vmin     : voltage = 1.14 V
+      parameter Vmax     : voltage = 3.465 V
+      parameter Vmax_abs : voltage = 3.60 V
+      constraint net.V == bank_15.Vio
+      constraint net.V in [Vmin, Vmax]
+      constraint net.V.Vhi <= Vmax_abs
+    pin H16   VCCO_34     role power_in
+      parameter Vmin     : voltage = 1.14 V
+      parameter Vmax     : voltage = 3.465 V
+      parameter Vmax_abs : voltage = 3.60 V
+      constraint net.V == bank_34.Vio
+      constraint net.V in [Vmin, Vmax]
+      constraint net.V.Vhi <= Vmax_abs
+    pin H17   VCCO_35     role power_in
+      parameter Vmin     : voltage = 1.14 V
+      parameter Vmax     : voltage = 3.465 V
+      parameter Vmax_abs : voltage = 3.60 V
+      constraint net.V == bank_35.Vio
+      constraint net.V in [Vmin, Vmax]
+      constraint net.V.Vhi <= Vmax_abs
+
+    # Representative slice of digital_io pins per bank.
+    pin C2    IO_L1P_T0_14   role digital_io
+    pin C3    IO_L1N_T0_14   role digital_io
+    pin D2    IO_L2P_T0_14   role digital_io
+    pin D3    IO_L2N_T0_14   role digital_io
+    pin E2    IO_L3P_T0_14   role digital_io
+    pin E3    IO_L3N_T0_14   role digital_io
+
+    pin F1    IO_L1P_T0_15   role digital_io
+    pin F2    IO_L1N_T0_15   role digital_io
+    pin G1    IO_L2P_T0_15   role digital_io
+    pin G2    IO_L2N_T0_15   role digital_io
+
+    pin T2    IO_L1P_T0_34   role digital_io
+    pin T3    IO_L1N_T0_34   role digital_io
+    pin U2    IO_L2P_T0_34   role digital_io
+    pin U3    IO_L2N_T0_34   role digital_io
+
+    pin R16   IO_L1P_T0_35   role digital_io
+    pin R17   IO_L1N_T0_35   role digital_io
+    pin T16   IO_L2P_T0_35   role digital_io
+    pin T17   IO_L2N_T0_35   role digital_io
+
+  # Power port views (sink role: this part consumes power)
+  view <POWER> as sink  vccint
+    POSITIVE  VCCINT
+    NEGATIVE  GND
+  view <POWER> as sink  vccaux
+    POSITIVE  VCCAUX
+    NEGATIVE  GND
+
+  # Per-bank VCCO views, each becomes the bank's `vio_port` (referenced
+  # by `derive vref = bank(SDA).vio_port` on the provides declarations).
+  view <POWER> as sink  vio_14
+    POSITIVE  VCCO_14
+    NEGATIVE  GND
+  view <POWER> as sink  vio_15
+    POSITIVE  VCCO_15
+    NEGATIVE  GND
+  view <POWER> as sink  vio_34
+    POSITIVE  VCCO_34
+    NEGATIVE  GND
+  view <POWER> as sink  vio_35
+    POSITIVE  VCCO_35
+    NEGATIVE  GND
+
+  # I/O banks. The Vio parameter is a finite-domain constraint
+  # variable; the elaborator picks a value subject to the buses that
+  # land on the bank. `vio_port` is the <POWER> view that wrappers
+  # consume via `derive vref = bank(...).vio_port`.
+  bank bank_14
+    parameter Vio : voltage in { 1.8 V, 2.5 V, 3.3 V }
+    pins { IO_L1P_T0_14, IO_L1N_T0_14,
+           IO_L2P_T0_14, IO_L2N_T0_14,
+           IO_L3P_T0_14, IO_L3N_T0_14 }
+    alias vio_port = vio_14
+
+  bank bank_15
+    parameter Vio : voltage in { 1.8 V, 2.5 V, 3.3 V }
+    pins { IO_L1P_T0_15, IO_L1N_T0_15,
+           IO_L2P_T0_15, IO_L2N_T0_15 }
+    alias vio_port = vio_15
+
+  bank bank_34
+    parameter Vio : voltage in { 1.8 V, 2.5 V, 3.3 V }
+    pins { IO_L1P_T0_34, IO_L1N_T0_34,
+           IO_L2P_T0_34, IO_L2N_T0_34 }
+    alias vio_port = vio_34
+
+  bank bank_35
+    parameter Vio : voltage in { 1.8 V, 2.5 V, 3.3 V }
+    pins { IO_L1P_T0_35, IO_L1N_T0_35,
+           IO_L2P_T0_35, IO_L2N_T0_35 }
+    alias vio_port = vio_35
+
+  # Soft-peripheral capabilities. Each `provides` is a factory of bus
+  # instances; the board materializes them by writing
+  # `<inst>.<lowercase_circuit>.<name> <-> <peer>`. The `derive` rules
+  # publish the bank's Vio (and its <POWER> port) to whatever wrapper
+  # the bus instance materializes. Wrappers pick up the values via
+  # their own <I2C>/<SPI>/<UART> role-level `derive` rules -- this is
+  # how `<i2c_link>(Vio = 3.3 V, vref = ...)` gets bound automatically
+  # without the connect site spelling it out.
+
+  provides <I2C> as host
+    pool pins where role == digital_io
+    per_bus
+      SDA in pool
+      SCL in pool
+      where bank(SDA) == bank(SCL)
+    derive vref = bank(SDA).vio_port
+    derive Vio  = bank(SDA).Vio
+
+  provides <SPI> as host
+    pool pins where role == digital_io
+    per_bus
+      SCK  in pool
+      MOSI in pool
+      MISO in pool
+      CS   in pool
+      where bank(SCK) == bank(MOSI)
+      where bank(SCK) == bank(MISO)
+      where bank(SCK) == bank(CS)
+    derive Vio  = bank(SCK).Vio
+
+  provides <UART> as host
+    pool pins where role == digital_io
+    per_bus
+      TX in pool
+      RX in pool
+      where bank(TX) == bank(RX)
+    derive Vio  = bank(TX).Vio

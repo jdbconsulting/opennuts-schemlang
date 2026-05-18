@@ -1,0 +1,62 @@
+# std/passives.schemlang
+#
+# Generic passive families. Real catalog parts inherit from these.
+# Demonstrates: package binding with swap groups, parametric components.
+
+include "std/power.schemlang"
+
+define [0402]
+  pin 1
+  pin 2
+  swap_group { 1, 2 }
+
+
+define [0603]
+  pin 1
+  pin 2
+  swap_group { 1, 2 }
+
+
+define [SOD-123]
+  pin 1   # cathode (banded end)
+  pin 2   # anode
+  # Diodes are NOT swappable.
+
+
+define {RESISTOR}
+  description       "RES THICK_FILM <R> <Tol> <P_max> 0402"
+  designator_prefix R
+  parameter R       : resistance
+  parameter P_max   : power     = 100 mW
+  parameter Tol     : percent   = 1 %
+
+  [0402]
+    pin 1   T1   role passive
+    pin 2   T2   role passive
+
+  # Power dissipation constraint, evaluated when net voltages
+  # and currents are known.
+  constraint (T1.net.V - T2.net.V)^2 / R <= P_max
+
+
+define {CAPACITOR}
+  description       "CAP CER <C> <Tol> <V_max> X7R 0402"
+  designator_prefix C
+  parameter C       : capacitance
+  parameter V_max   : voltage     = 10 V
+  parameter Tol     : percent     = 10 %
+
+  [0402]
+    pin 1   T1   role passive
+    pin 2   T2   role passive
+
+  constraint abs(T1.net.V - T2.net.V) <= V_max
+
+
+# Convenient catalog entries via aliases.
+alias {R_10k}   = {RESISTOR}(R = 10 k)
+alias {R_4k7}   = {RESISTOR}(R = 4.7 k)
+alias {R_100}   = {RESISTOR}(R = 100, P_max = 250 mW)
+alias {C_100n}  = {CAPACITOR}(C = 100 nF, V_max = 16 V)
+alias {C_1u}    = {CAPACITOR}(C = 1 uF,   V_max = 10 V)
+alias {C_10u}   = {CAPACITOR}(C = 10 uF,  V_max = 10 V)

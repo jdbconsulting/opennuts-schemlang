@@ -1,0 +1,130 @@
+# parts/stm32h7.schemlang
+#
+# A stripped-down STM32H743 entry illustrating the modeling pieces
+# that real MCUs need:
+#   * GPIO banks with shared current budgets
+#   * peripheral instances with multiple alternate-function bank options
+#   * power domains with their own windows
+#
+# The MCU `bus` form (closed alt-function table) is the right shape
+# for parts whose peripheral count is fixed at silicon time. For
+# FPGA-style flexible I/O, see `provides` in xilinx_xc7a35t.schemlang.
+
+include "std/power.schemlang"
+include "std/spi.schemlang"  only { SPI }
+include "std/i2c.schemlang"  only { I2C }
+
+
+define [LQFP-100]
+  generate for n in 1 .. 100
+    pin n
+
+
+define {STM32H743VIT6}
+  description       "MCU STM32H7 480MHZ LQFP-100"
+  designator_prefix U
+
+  # Every parameter in this body is justified by an elaborator check.
+  # Datasheet trivia (Tr, MSL, lifecycle, MPN, etc.) is intentionally
+  # absent.
+
+  [LQFP-100]
+    # Power. Vmin/Vmax are repeated per-pin so the rail check is
+    # pin-local; the elaborator deduplicates identical bounds when
+    # it discharges the constraint.
+    pin 28  VDD       role power_in
+      parameter Vmin     : voltage = 1.62 V
+      parameter Vmax     : voltage = 3.6 V
+      parameter Vmax_abs : voltage = 4.0 V        # destruction (per DS abs-max)
+      constraint net.V in [Vmin, Vmax]
+      constraint net.V.Vhi <= Vmax_abs
+    pin 50  VDD       role power_in
+      parameter Vmin     : voltage = 1.62 V
+      parameter Vmax     : voltage = 3.6 V
+      parameter Vmax_abs : voltage = 4.0 V
+      constraint net.V in [Vmin, Vmax]
+      constraint net.V.Vhi <= Vmax_abs
+    pin 75  VDD       role power_in
+      parameter Vmin     : voltage = 1.62 V
+      parameter Vmax     : voltage = 3.6 V
+      parameter Vmax_abs : voltage = 4.0 V
+      constraint net.V in [Vmin, Vmax]
+      constraint net.V.Vhi <= Vmax_abs
+    pin 27  VSS       role ground
+    pin 49  VSS       role ground
+    pin 74  VSS       role ground
+    pin 22  VDDA      role power_in
+      parameter Vmin     : voltage = 1.62 V
+      parameter Vmax     : voltage = 3.6 V
+      parameter Vmax_abs : voltage = 4.0 V
+      constraint net.V in [Vmin, Vmax]
+      constraint net.V.Vhi <= Vmax_abs
+    pin 21  VSSA      role ground
+
+    # A handful of GPIOs across two banks
+    pin 41  PA4       role digital_io
+    pin 42  PA5       role digital_io
+    pin 43  PA6       role digital_io
+    pin 44  PA7       role digital_io
+
+    pin 60  PE11      role digital_io
+    pin 61  PE12      role digital_io
+    pin 62  PE13      role digital_io
+    pin 63  PE14      role digital_io
+
+  # Power port views (sink role: this part consumes power)
+  view <POWER> as sink  vdd_main
+    POSITIVE  VDD
+    NEGATIVE  VSS
+  view <POWER> as sink  vdd_analog
+    POSITIVE  VDDA
+    NEGATIVE  VSSA
+
+  # GPIO banks with aggregate budgets. Vio here is bound to the
+  # VDD pin's net voltage -- STM32H7 banks aren't independently
+  # switchable like FPGA banks, so Vio collapses to a singleton
+  # once VDD is bound.
+  bank A
+    pins   { PA4, PA5, PA6, PA7 }
+    parameter I_max : current = 100 mA
+    parameter Vio   : voltage
+    constraint Vio == vdd_main.Vnom
+    constraint over { p in pins } { sum(p.I_load) <= I_max }
+    alias vio_port = vdd_main
+
+  bank E
+    pins   { PE11, PE12, PE13, PE14 }
+    parameter I_max : current = 100 mA
+    parameter Vio   : voltage
+    constraint Vio == vdd_main.Vnom
+    constraint over { p in pins } { sum(p.I_load) <= I_max }
+    alias vio_port = vdd_main
+
+  # A peripheral instance with two alternate-function banks
+  bus spi1 : <SPI> as host
+    bank A   { CLK = PA5, MOSI = PA7, MISO = PA6, CS_N = PA4 }
+    bank E   { CLK = PE12, MOSI = PE14, MISO = PE13, CS_N = PE11 }
+    derive Vio = bank(CLK).Vio
+
+
+# A handy power-and-decoupling circuit that real boards would drop in
+# once and stop thinking about.
+define <stm32h7_power_block>
+  port vdd  : <3V3> as sink
+  port vdda : <3V3> as sink
+
+  parameter n_bypass : count = 4         # one 100 nF per VDD pin pair
+  parameter c_bulk   : capacitance = 4.7 uF
+
+  generate for i in 0 .. n_bypass - 1
+    by[i]      = {C_100n}
+    by[i].T1  <-> vdd.POSITIVE
+    by[i].T2  <-> vdd.NEGATIVE
+
+  bulk          = {CAPACITOR}(C = c_bulk, V_max = 10 V)
+  bulk.T1       <-> vdd.POSITIVE
+  bulk.T2       <-> vdd.NEGATIVE
+
+  by_a          = {C_100n}
+  by_a.T1       <-> vdda.POSITIVE
+  by_a.T2       <-> vdda.NEGATIVE

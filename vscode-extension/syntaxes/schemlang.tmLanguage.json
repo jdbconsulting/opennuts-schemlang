@@ -1,0 +1,66 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "Schemlang",
+    "scopeName": "source.schemlang",
+    "patterns": [
+        { "include": "#comments" },
+        { "include": "#strings" },
+        { "include": "#sigils" },
+        { "include": "#numbers" },
+        { "include": "#keywords" },
+        { "include": "#identifiers" }
+    ],
+    "repository": {
+        "comments": {
+            "patterns": [
+                { "name": "comment.line.number-sign.schemlang", "match": "#.*$" },
+                { "name": "comment.block.schemlang", "begin": "#:", "end": ":#" }
+            ]
+        },
+        "strings": {
+            "patterns": [
+                {
+                    "name": "string.quoted.double.schemlang",
+                    "begin": "\"",
+                    "end": "\"",
+                    "patterns": [
+                        { "name": "constant.character.escape.schemlang", "match": "\\\\." }
+                    ]
+                }
+            ]
+        },
+        "sigils": {
+            "patterns": [
+                { "name": "entity.name.type.circuit.schemlang",   "match": "<[A-Za-z_][A-Za-z0-9_\\-]*>" },
+                { "name": "entity.name.type.part.schemlang",      "match": "\\{[A-Za-z_][A-Za-z0-9_\\-]*\\}" },
+                { "name": "entity.name.type.footprint.schemlang", "match": "\\[[A-Za-z_][A-Za-z0-9_\\-]*\\]" }
+            ]
+        },
+        "numbers": {
+            "patterns": [
+                { "name": "constant.numeric.schemlang", "match": "\\b[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?[a-zA-ZµΩ%]*\\b" }
+            ]
+        },
+        "keywords": {
+            "patterns": [
+                {
+                    "name": "keyword.control.schemlang",
+                    "match": "\\b(define|instance|connect|require|prefer|allow|forbid|hint|parameter|when|if|else|elif|for|in|return|with|as|of|using|where|select|do|import|from|export)\\b"
+                },
+                {
+                    "name": "storage.type.schemlang",
+                    "match": "\\b(circuit|footprint|part|symbol|net|pad|pin|port|lane|bank|signal|rail|power|ground|domain|tag|class|kind|count|range|min|max|nominal|tolerance|priority|alternate)\\b"
+                },
+                {
+                    "name": "constant.language.schemlang",
+                    "match": "\\b(true|false|none|any|all|some|each|self|this)\\b"
+                }
+            ]
+        },
+        "identifiers": {
+            "patterns": [
+                { "name": "variable.other.schemlang", "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b" }
+            ]
+        }
+    }
+}

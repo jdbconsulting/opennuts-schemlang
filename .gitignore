@@ -1,0 +1,83 @@
+# ---------------------------------------------------------------------------
+# CMake / native build outputs
+# ---------------------------------------------------------------------------
+/build/
+/build-*/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+install_manifest.txt
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# Compiled object / library / executable artifacts
+*.o
+*.obj
+*.lo
+*.slo
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.app
+*.pdb
+*.ilk
+*.exp
+*.gch
+*.pch
+
+# ---------------------------------------------------------------------------
+# WASM / Emscripten artifacts (when not in build-*/)
+# ---------------------------------------------------------------------------
+*.wasm
+*.wasm.map
+*.wat
+schemlang_wasm.js
+schemlang_wasm.js.map
+
+# ---------------------------------------------------------------------------
+# VS Code extension (Node / TypeScript)
+# ---------------------------------------------------------------------------
+node_modules/
+vscode-extension/out/
+vscode-extension/*.vsix
+vscode-extension/.vscode-test/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# ---------------------------------------------------------------------------
+# Editor / OS noise
+# ---------------------------------------------------------------------------
+.vscode/
+!vscode-extension/.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------------------------
+# Local environment overrides (never commit secrets / API keys)
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+*.log
+.cache/
+compile_commands.json

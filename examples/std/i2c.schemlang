@@ -1,0 +1,83 @@
+# std/i2c.schemlang
+#
+# I2C protocol family. Demonstrates the constraint-driven model:
+#
+#   * <I2C> declares roles with explicit cardinality (host = 1,
+#     peripheral >= 1) and `derive` rules that publish each
+#     participant's view of `vref` and `Vio` to the bus instance.
+#   * <i2c_link> is the wrapper that adds external pull-ups; its
+#     `vref` port auto-binds via the participants' `derive`s.
+#   * The <I2C> `resolution` block biases conservative -- if any
+#     participant prefers <i2c_link>, the wrapper is materialized.
+#
+# See docs/02-semantic-model.md section 3.4-section 3.5 for the bus-instance and
+# resolution machinery, and docs/04-cookbook.md Recipe 15 for the
+# end-to-end story.
+
+include "std/power.schemlang"
+include "std/passives.schemlang"
+
+
+define <I2C>
+  lane SDA, SCL : digital
+
+  role host
+    cardinality = 1
+    drives    { SCL }
+    bidir     { SDA }
+    # The host's bank vio is the bus reference. Wrappers consume
+    # this via their `vref` / `Vio` ports/parameters.
+    derive vref = bank(SDA).vio_port
+    derive Vio  = bank(SDA).Vio
+
+  role peripheral
+    cardinality >= 1
+    receives  { SCL }
+    bidir     { SDA }
+    # A peripheral's own VCC pin doubles as its view of the bus
+    # voltage. If host and peripherals disagree, the elaborator
+    # emits a UNSAT core citing each participant's derivation.
+    derive vref = supply.vio_port
+    derive Vio  = supply.Vio
+
+  # Default resolution: any participant preferring the wrapper
+  # (i.e. `prefer wrapper = <i2c_link>` on a port) wins. This
+  # biases conservative -- if even one device claims it needs
+  # external pull-ups, we add them. Engineers who want the bare
+  # protocol override at scope or connect-site level.
+  resolution
+    case any(prefers <i2c_link>)  =>  <i2c_link>     weight 10
+    case all(prefers <I2C>)       =>  <I2C>          weight 5
+    default                       =>  <i2c_link>     weight 1
+
+
+# Wrapper that adds external pull-ups, parametric by Vio and bus speed.
+# The `vref` non-lane port and `Vio` parameter are auto-bound by the
+# participants' `derive` rules; if both bind, the elaborator unifies
+# them (and reports an UNSAT core if the participants disagree on Vio).
+define <i2c_link> : <I2C>
+  parameter Vio   : voltage    in {1.8 V, 2.5 V, 3.3 V, 5.0 V}
+  parameter R_pu  : resistance in [1 k, 100 k] = 4.7 k +/- 1 %
+  parameter f_max : frequency  in {100 kHz, 400 kHz, 1 MHz, 3.4 MHz} = 400 kHz
+  parameter C_bus : capacitance = 100 pF
+
+  # Reference rail: bound implicitly by participants' `derive vref = ...`,
+  # or explicitly via a connect-site `vref = ...` argument.
+  port vref : <POWER> as peripheral
+
+  pull_sda = {RESISTOR}(R = R_pu)
+  pull_scl = {RESISTOR}(R = R_pu)
+
+  # Pull-ups are *incident* on the lanes (parallel, not series).
+  pull_sda.T1 <-> SDA
+  pull_sda.T2 <-> vref.POSITIVE
+  pull_scl.T1 <-> SCL
+  pull_scl.T2 <-> vref.POSITIVE
+
+  # Refinement check on pull strength vs. bus speed and capacitance.
+  # Nonlinear; deferred to numeric evaluation once R_pu, C_bus, and
+  # f_max are concrete. Becomes a residual if any are unbound.
+  constraint pull_strength : R_pu * C_bus < 1 / (3 * f_max)
+
+  # Sanity: vref voltage equals the configured Vio.
+  constraint vref.Vnom == Vio

@@ -1,0 +1,105 @@
+# parts/winbond_w25n.schemlang
+#
+# Winbond W25N512GVEIG SPI/QSPI flash.
+#
+# Only parameters that drive an elaborator check appear here. The
+# rest of the datasheet stays in the datasheet (principle: extra
+# component parameters are sometimes useful and usually wrong).
+#
+# Demonstrates:
+#   * package binding with logical pin aliases
+#   * per-pin refinement parameters (Vmin/Vmax) used by the rail check
+#   * circuit views in role `peripheral`
+#   * a port-level `derive Vio = ...` that publishes the device's
+#     view of bus voltage to whatever wrapper materializes for the
+#     SPI/QSPI bus instance
+#   * a `<boot_flash_slot>` reusable wiring circuit
+
+include "std/power.schemlang"
+include "std/spi.schemlang"   only { SPI, QSPI }
+include "std/passives.schemlang"
+
+
+define [WSON8]
+  # 6x5 mm WSON, 1.27 mm pitch.
+  pin 1
+  pin 2
+  pin 3
+  pin 4
+  pin 5
+  pin 6
+  pin 7
+  pin 8
+
+
+define {W25N512GVEIG}
+  description       "MEM FLASH 512MBIT SPI/QUAD WSON-8"
+  designator_prefix U
+
+  [WSON8]
+    pin 1  CS_N                role digital_in
+    pin 2  DO    IO1          role digital_io
+    pin 3  WP_N   IO2          role digital_io
+    pin 4  GND                role ground
+    pin 5  DI    IO0          role digital_io
+    pin 6  CLK                role digital_in
+    pin 7  HOLD_N IO3          role digital_io
+    pin 8  VCC                role power_in
+      # Justified: Vmin/Vmax discharge the rail-window refinement check
+      # (containment, not membership -- see docs/02-semantic-model.md
+      # section 6.1). Vmax_abs powers derating analysis: a soft
+      # constraint can ask the rail to stay 20% below abs-max.
+      parameter Vmin     : voltage = 2.7 V
+      parameter Vmax     : voltage = 3.6 V
+      parameter Vmax_abs : voltage = 4.6 V        # destruction threshold
+      constraint net.V in [Vmin, Vmax]            # operating window (HARD)
+      constraint net.V.Vhi <= Vmax_abs            # destruction (HARD)
+
+  view <POWER> as sink   pwr
+    POSITIVE  VCC
+    NEGATIVE  GND
+
+  view <SPI> as peripheral   spi
+    CS_N   CS_N
+    CLK   CLK
+    MOSI  IO0
+    MISO  IO1
+    # The flash gets its bus reference voltage from its own VCC pin;
+    # publish that to the bus instance so a wrapper can unify it
+    # with the host's bank Vio.
+    derive Vio = pwr.Vnom
+
+  view <QSPI> as peripheral   qspi
+    CS_N   CS_N
+    CLK   CLK
+    IO0   IO0
+    IO1   IO1
+    IO2   IO2
+    IO3   IO3
+    derive Vio = pwr.Vnom
+
+  # Justified: local_decoupling() is an elaborator check that walks
+  # the VCC net and verifies a >= 100 nF cap is connected close to
+  # this instance.
+  constraint local_decoupling(VCC, GND) >= 100 nF
+
+
+# A reusable wiring pattern for "boot flash with CS_N pull-up", so
+# the board can say `flash = <boot_flash_slot>` and stop worrying.
+define <boot_flash_slot>
+  parameter R_pullup : resistance = 10 k +/- 1 %
+  port spi : <SPI>   as peripheral
+  port pwr : <3V3>   as sink
+
+  flash    = {W25N512GVEIG}
+  pull_cs  = {RESISTOR}(R = R_pullup)
+  bypass   = {C_100n}
+
+  flash.spi    <-> spi
+  flash.pwr    <-> pwr
+
+  pull_cs.T1   <-> spi.CS_N
+  pull_cs.T2   <-> pwr.POSITIVE
+
+  bypass.T1    <-> pwr.POSITIVE
+  bypass.T2    <-> pwr.NEGATIVE

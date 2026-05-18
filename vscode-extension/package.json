@@ -1,0 +1,62 @@
+{
+  "name": "schemlang",
+  "displayName": "Schemlang",
+  "description": "Language support for the Schemlang schematic DSL.",
+  "version": "0.1.0",
+  "publisher": "schemlang",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": ["Programming Languages"],
+  "activationEvents": [
+    "onLanguage:schemlang"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "schemlang",
+        "aliases": ["Schemlang", "schemlang"],
+        "extensions": [".schemlang"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "schemlang",
+        "scopeName": "source.schemlang",
+        "path": "./syntaxes/schemlang.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Schemlang",
+      "properties": {
+        "schemlang.serverPath": {
+          "type": "string",
+          "default": "schemlang",
+          "description": "Path to the schemlang binary (must support --lsp). Can be absolute, workspace-relative, or just a name. If left as 'schemlang', the extension also searches common build directories (build/bin, build/, etc.) under each workspace folder before falling back to PATH."
+        },
+        "schemlang.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Trace JSON-RPC communication with the schemlang LSP server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch":   "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node":   "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "typescript":    "^5.0.0"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

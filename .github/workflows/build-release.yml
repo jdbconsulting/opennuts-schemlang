@@ -1,0 +1,152 @@
+name: Build & Release
+
+# Build the native CLI/LSP and the WASM bundle on every push and
+# pull-request, and publish them as a GitHub Release whenever a
+# semver tag (``v*``) is pushed. Untagged builds still upload their
+# artifacts so a green check on a feature branch always carries a
+# downloadable binary.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  # ``softprops/action-gh-release`` writes the release; the read-only
+  # default token isn't enough.
+  contents: write
+
+concurrency:
+  # Coalesce per-ref runs so a fast-followed push doesn't queue up
+  # redundant builds, but never cancel tag builds: releases must run
+  # to completion or the artifacts get half-uploaded.
+  group: build-release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  # ------------------------------------------------------------------
+  # Native CLI / LSP server (Linux x86_64).
+  # ------------------------------------------------------------------
+  build-native:
+    name: Build native (linux x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up CMake & Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Configure
+        # CMakeLists.txt fetches lexy + nlohmann/json via FetchContent;
+        # ubuntu-latest's default gcc-13 satisfies the C++20 floor and
+        # the C++26 auto-detection in the project's _schemlang_pick_cxx_std.
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Smoke-test the CLI
+        # Every example in examples/std,parts,boards should pass
+        # --check. The same loop ships in README.md as the "Quick
+        # sanity check"; running it in CI keeps the corpus honest.
+        run: |
+          set -e
+          fail=0
+          for f in examples/std/*.schemlang examples/parts/*.schemlang examples/boards/*.schemlang; do
+              if ! build/bin/schemlang --check "$f" > /tmp/out 2>&1; then
+                  echo "::error file=$f::syntax check failed"
+                  cat /tmp/out
+                  fail=1
+              fi
+          done
+          test "$fail" = 0
+
+      - name: Package
+        # Ship a single tarball with the binary, the README and the
+        # docs/ directory so a downstream consumer has the grammar
+        # reference next to the executable.
+        run: |
+          mkdir -p dist staging/opennuts-schemlang-linux-x86_64
+          cp build/bin/schemlang        staging/opennuts-schemlang-linux-x86_64/
+          cp README.md                  staging/opennuts-schemlang-linux-x86_64/
+          cp -R docs                    staging/opennuts-schemlang-linux-x86_64/docs
+          tar -C staging -czf dist/opennuts-schemlang-linux-x86_64.tar.gz opennuts-schemlang-linux-x86_64
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opennuts-schemlang-linux-x86_64
+          path: dist/opennuts-schemlang-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # WASM bundle (schemlang_wasm.{js,wasm}).
+  # ------------------------------------------------------------------
+  build-wasm:
+    name: Build WASM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Emscripten
+        # Pinned so the CI bundle is bit-for-bit reproducible across
+        # runs. Bump when the local toolchain bumps.
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.64
+          actions-cache-folder: emsdk-cache
+
+      - name: Configure (emcmake)
+        # CMakeLists.txt auto-detects emscripten and flips
+        # SCHEMLANG_BUILD_WASM=ON / SCHEMLANG_BUILD_CLI=OFF, so we just
+        # need to drive cmake through ``emcmake``.
+        run: emcmake cmake -S . -B build-wasm -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-wasm --parallel
+
+      - name: Package
+        # The WASM build emits schemlang_wasm.js (modularised UMD glue)
+        # + schemlang_wasm.wasm next to each other; ship them as a
+        # single tarball so consumers don't have to download two files
+        # in sync.
+        run: |
+          mkdir -p dist staging/opennuts-schemlang-wasm
+          cp build-wasm/bin/schemlang_wasm.js   staging/opennuts-schemlang-wasm/
+          cp build-wasm/bin/schemlang_wasm.wasm staging/opennuts-schemlang-wasm/
+          cp README.md                          staging/opennuts-schemlang-wasm/
+          tar -C staging -czf dist/opennuts-schemlang-wasm.tar.gz opennuts-schemlang-wasm
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opennuts-schemlang-wasm
+          path: dist/opennuts-schemlang-wasm.tar.gz
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------
+  # Publish a GitHub Release whenever a ``v*`` tag triggers the build.
+  # On non-tag pushes the artifacts are only available via the run's
+  # "Artifacts" panel, which is fine for ad-hoc consumption.
+  # ------------------------------------------------------------------
+  release:
+    name: Publish release
+    needs: [build-native, build-wasm]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true
+          fail_on_unmatched_files: true

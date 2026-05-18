@@ -1,0 +1,45 @@
+# boards/custom_spi_link.schemlang
+#
+# Demonstrates Recipe 4 from the cookbook: deviating from a standard
+# SPI link with a stiffer pull-up, a clock fan-out, and a Thevenin
+# termination on MOSI. The whole deviation is a 12-line circuit.
+#
+# The override of `R_pullup` is a hard binding of an inherited
+# constraint variable; the parent's domain (`10 k +/- 1 %`) is
+# replaced with `4.7 k +/- 1 %`.
+
+include "std/power.schemlang"
+include "std/spi.schemlang"
+include "std/passives.schemlang"
+include "parts/winbond_w25n.schemlang"
+
+alias {BUF_1G07}  = {SN74LVC1G07}     # single-gate non-inverting buffer
+alias {R_term}    = {RESISTOR}(R = 100, P_max = 100 mW, Tol = 1 %)
+
+
+define <split_clock_spi_link> : <boot_flash_slot>
+  # Stiffer pull-up. `override` is recommended (not required for a
+  # value-only change) because it makes the deviation auditable.
+  override parameter R_pullup = 4.7 k +/- 1 %
+
+  # A second flash, fanned-out clock.
+  flash2 = {W25N512GVEIG}
+  buf    = {BUF_1G07}
+
+  buf.A   <-> spi.CLK
+  buf.Y   <-> flash2.spi.CLK
+  flash2.spi.CS_N  <-> spi.CS_N       # (illustrative; real designs would gate CS_N)
+  flash2.spi.MOSI <-> spi.MOSI
+  flash2.spi.MISO <-> spi.MISO
+  flash2.pwr      <-> pwr
+
+  # Thevenin termination on MOSI (long trace to second flash).
+  rt_top = {R_term}
+  rt_bot = {R_term}
+  rt_top.T1 <-> spi.MOSI
+  rt_top.T2 <-> pwr.POSITIVE
+  rt_bot.T1 <-> spi.MOSI
+  rt_bot.T2 <-> pwr.NEGATIVE
+
+  # The base circuit's flash and pull_cs are inherited as-is. The diff
+  # against <boot_flash_slot> is exactly what's written above.

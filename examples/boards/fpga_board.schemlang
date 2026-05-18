@@ -1,0 +1,112 @@
+# boards/fpga_board.schemlang
+#
+# An Artix-7 FPGA board demonstrating the constraint-driven model:
+#
+#   * Multiple multi-drop I2C bus instances on FPGA `provides <I2C>`,
+#     each with N peripherals;
+#   * Bank Vio variables left partially unbound (as constraint
+#     variables in the residual) -- placement decides which banks
+#     run at which voltage;
+#   * Per-port `prefer wrapper = ...` declarations on devices that
+#     have internal pull-ups, demonstrating the resolution machinery;
+#   * A scope-level `prefer <I2C> = <i2c_link>` pinning the global
+#     answer for everything that doesn't override at port level.
+
+include "std/power.schemlang"
+include "std/spi.schemlang"   only { SPI }
+include "std/i2c.schemlang"
+include "std/uart.schemlang"
+include "std/passives.schemlang"
+include "parts/xilinx_xc7a35t.schemlang"
+
+# Project-wide preferences.
+prefer {RESISTOR}  = {ERJ-PHF}
+prefer {CAPACITOR} = {GRM}
+
+# I2C wrappers project-wide. Per-port preferences (e.g. an IMU with
+# internal pull-ups) override locally via the resolution block.
+prefer <I2C> = <i2c_link>(R_pu = 4.7 k)
+
+
+define <fpga_board>
+  port vbus_3v3 : <3V3> as sink
+  port vbus_1v8 : <1V8> as sink
+
+  # -----------------------------------------------------------------
+  # FPGA. Bank Vios are constraint variables; we constrain bank_14
+  # and bank_34 to 3.3 V to host generic sensors, and leave bank_15
+  # and bank_35 unconstrained (placement picks 1.8 V or 3.3 V).
+  # -----------------------------------------------------------------
+  fpga = {XC7A35T} @ U1
+    hint placement  "anchor of the layout; near power input"
+    hint priority   level = critical
+
+  fpga.vccint   <-> vbus_1v8       # core 1.0 V derived from a downstream LDO not modeled here
+  fpga.vccaux   <-> vbus_1v8
+
+  # Hard bank Vio bindings (board-author decision).
+  constraint fpga.bank_14.Vio == 3.3 V
+  constraint fpga.bank_34.Vio == 3.3 V
+  # bank_15 and bank_35 left as variables; the residual carries
+  # their domain {1.8 V, 2.5 V, 3.3 V} unless a bus on them
+  # narrows it.
+
+  # Power the bank VIOs. Each `vio_port` is a <POWER> view; we
+  # connect each to whichever rail satisfies its Vio.
+  fpga.vio_14   <-> vbus_3v3
+  fpga.vio_34   <-> vbus_3v3
+  # vio_15 and vio_35 connections are deferred -- the residual
+  # includes "vio_15.POSITIVE must connect to a rail equal to
+  # bank_15.Vio" as a constraint placement satisfies.
+
+  # -----------------------------------------------------------------
+  # Multi-drop I2C bus: three sensors on one bus instance.
+  # All three `<->` lines name `fpga.i2c.sensors`, so they join
+  # the same bus instance. The wrapper materializes once with one
+  # host and three peripherals; one set of pull-ups, not three.
+  # -----------------------------------------------------------------
+  imu     = {IMU_PLACEHOLDER}                    # imagine LIS3DH or similar
+  env     = {ENV_PLACEHOLDER}                    # imagine SHT40
+  baro    = {BARO_PLACEHOLDER}                   # imagine BMP390
+
+  fpga.i2c.sensors <-> imu.i2c
+  fpga.i2c.sensors <-> env.i2c
+  fpga.i2c.sensors <-> baro.i2c
+
+  # -----------------------------------------------------------------
+  # Separate I2C bus: a sensor with internal pull-ups. The device
+  # model declares `prefer wrapper = <I2C>` on its port, which the
+  # resolution block of <I2C> picks up and biases away from the
+  # wrapper. But because the project has a HARD `prefer <I2C> =
+  # <i2c_link>` at top level, the wrapper still wins -- to actually
+  # suppress it we override at the connect site.
+  # -----------------------------------------------------------------
+  iso_imu = {ISOLATED_IMU_PLACEHOLDER}
+
+  fpga.i2c.iso <-> iso_imu.i2c
+    prefer <I2C> = <I2C>          # bind abstract to itself, suppress wrapper
+
+  # -----------------------------------------------------------------
+  # 1.8 V I2C segment on a separate bus. Vio narrows the wrapper's
+  # finite-domain Vio variable, and the FPGA bank Vio narrows in
+  # response -- placement may bind bank_15.Vio = 1.8 V or
+  # bank_35.Vio = 1.8 V, whichever the solver picks (or report
+  # both as candidates in the explain trace).
+  # -----------------------------------------------------------------
+  lv_sensor = {LV_SENSOR_PLACEHOLDER}
+
+  fpga.i2c.lv <-> lv_sensor.i2c
+    parameter Vio  = 1.8 V
+    parameter R_pu = 2.2 k
+
+  # -----------------------------------------------------------------
+  # SPI boot flash, simple point-to-point.
+  # -----------------------------------------------------------------
+  flash = {W25N512GVEIG}
+
+  fpga.spi.boot <-> flash.spi
+    parameter trace_length = 25 mm
+    parameter f_max        = 50 MHz
+
+
+use <fpga_board>

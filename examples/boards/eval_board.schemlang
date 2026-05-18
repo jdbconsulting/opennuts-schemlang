@@ -1,0 +1,145 @@
+# boards/eval_board.schemlang
+#
+# A small but realistic top-level board demonstrating the
+# constraint-driven model end-to-end:
+#
+#   * 5V input -> 3V3 LDO
+#   * STM32H7 MCU (sub-population) with bypass block
+#   * Boot flash (Winbond W25N) on SPI1
+#   * 8 status LEDs on bank A GPIOs
+#
+# Things that look like literals in this file (`R_pu`, `Vio`,
+# `bank` choices) are *constraint variables* in the elaboration
+# store; the solver picks values for them subject to the
+# aggregate constraints from every participating port.
+#
+# The build either fully resolves (FULL netlist + empty residual)
+# or leaves some bank choices to placement (PARTIAL netlist +
+# residual constraint system). `--require-resolved` rejects the
+# PARTIAL case for production fab.
+
+include "std/power.schemlang"
+include "std/spi.schemlang"
+include "std/i2c.schemlang"
+include "std/passives.schemlang"
+include "parts/winbond_w25n.schemlang"
+include "parts/stm32h7.schemlang"
+
+# Project-wide preferences. The same `prefer` form covers vendor
+# selection (component kind) and protocol decoration (circuit kind).
+# These are HARD bindings (priority above any soft resolution rule).
+prefer {RESISTOR}  = {ERJ-PHF}                          # Panasonic ERJ-PHF
+prefer {CAPACITOR} = {GRM}                              # Murata GRM ceramic
+prefer {LDO}       = {AP2127K}                          # Diodes Inc LDO family
+prefer <I2C>       = <i2c_link>(R_pu = 4.7 k)          # pull-ups on every I2C bus
+prefer <SPI>       = <spi_with_termination>(R_term = 22)  # conditional source termination
+
+# Abstract aliases. They resolve to concrete vendor parts at
+# elaboration via the `prefer` rules above.
+alias {LDO_3V3}  = {LDO}(V_out = 3.3 V, I_max = 300 mA)
+alias {LED}      = {LED_RED}        # (concrete; declared in a vendor lib)
+alias {R_330}    = {RESISTOR}(R = 330, P_max = 100 mW)
+
+
+define <eval_board>
+  port vbus : <5V0> as sink
+
+  # -----------------------------------------------------------------
+  # Power tree.
+  # -----------------------------------------------------------------
+  reg = {LDO_3V3}
+    designator U2
+    hint placement  "near vbus connector; bulk caps within 3 mm"
+    hint annotate   "fixed 3V3 LDO; bypass-cap pattern is asymmetric on purpose"
+
+  reg.IN          <-> vbus.POSITIVE
+  reg.GND         <-> vbus.NEGATIVE
+
+  NET_3V3 = reg.OUT          # explicit label for export readability
+  NET_GND = vbus.NEGATIVE
+
+  rail_3v3 : <3V3> as source
+  rail_3v3.POSITIVE <-> NET_3V3
+  rail_3v3.NEGATIVE <-> NET_GND
+
+  # -----------------------------------------------------------------
+  # MCU.
+  # -----------------------------------------------------------------
+  mcu       = {STM32H743VIT6} @ U1
+    hint placement  "center; near USB-C; rotate 90 deg"
+    hint annotate   "anchor of the layout; all high-speed lanes radiate from here"
+    hint priority   level = critical
+  mcu_pwr   = <stm32h7_power_block>
+
+  mcu_pwr.vdd   <-> rail_3v3
+  mcu_pwr.vdda  <-> rail_3v3
+  mcu.vdd_main  <-> rail_3v3
+  mcu.vdd_analog <-> rail_3v3
+
+  # -----------------------------------------------------------------
+  # Boot flash on SPI1. The bus<->bus connection threads through
+  # <spi_with_termination> per the `prefer <SPI>` rule above. The
+  # connect-site argument block (docs/03-syntax.md section 6.4) supplies
+  # trace-length / f_max parameters needed by the wrapper's
+  # elec_len conditional. Because the trace is short, the wrapper's
+  # `generate if elec_len > 0.1` predicate is false and no resistors
+  # are emitted.
+  # -----------------------------------------------------------------
+  flash_slot = <boot_flash_slot>(R_pullup = 10 k)
+
+  mcu.spi1     <-> flash_slot.spi
+    parameter trace_length = 35 mm     # short link; no termination triggered
+    parameter f_max        = 50 MHz
+  flash_slot.pwr <-> rail_3v3
+
+  # -----------------------------------------------------------------
+  # 8 status LEDs on bank A GPIOs (will conflict with SPI1's bank A
+  # choice, forcing the elaborator to pick bank E for SPI1 -- or
+  # emit a UNSAT core if both bank constraints are hard).
+  # -----------------------------------------------------------------
+  generate for i in 0 .. 7
+    led[i]  = {LED}
+    res[i]  = {R_330}
+    led[i].A <-> res[i].T1
+    res[i].T2 <-> rail_3v3.POSITIVE
+    # led[i].K wired to a bank A GPIO; pin choice via swap
+    led[i].K <-> mcu.bank_A.gpio[i]    # (illustrative; real path would name pins)
+
+  # -----------------------------------------------------------------
+  # Soft preference for SPI1 bank (tie-break weight, not a hard
+  # constraint). If the LEDs already exhausted bank A, this loses
+  # gracefully and the solver picks bank E.
+  # -----------------------------------------------------------------
+  prefer mcu.spi1.bank == E soft 5
+
+  # -----------------------------------------------------------------
+  # Layout intent. Hints don't affect the netlist; they ride along
+  # with elaboration output for typesetters, layout engines, and
+  # NLP-augmented review tools to consume. See cookbook Recipe 12.
+  # -----------------------------------------------------------------
+
+  hint sheet { reg, mcu_pwr }
+    name         "Power Tree"
+    page_number  2
+    text         "5V -> 3V3 LDO and MCU bypass network"
+
+  hint sheet flash_slot
+    name         "Storage"
+    page_number  3
+
+  hint signal_class { mcu.spi1.CLK, mcu.spi1.MOSI, mcu.spi1.MISO }
+    name              "spi_high_speed"
+    max_length        50.0 mm
+    match_length_group spi1
+    text              "boot SPI; route together; keep away from switching nodes"
+
+  hint near reg, mcu
+    max_distance      8.0 mm
+    text              "minimize 3V3 trace impedance to MCU"
+
+  hint rationale mcu.spi1
+    text              "soft-prefer bank E so LEDs can keep bank A; see prefer rule above"
+
+
+# Top-level entry: this is what `schemc` elaborates.
+use <eval_board>

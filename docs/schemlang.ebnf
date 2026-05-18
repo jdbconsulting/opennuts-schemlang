@@ -1,0 +1,737 @@
+(* ===========================================================================
+   Schemlang — Formal Grammar
+   ---------------------------------------------------------------------------
+   File:     schemlang.ebnf
+   Version:  draft v0.1
+   Companion: docs/03-syntax.md (prose), docs/02-semantic-model.md (semantics)
+
+   Conventions used in this file
+     ::=     production
+     |       alternation
+     ( ... ) grouping
+     ?       optional         (zero or one)
+     *       zero or more
+     +       one or more
+     '...'   literal terminal (case-sensitive)
+     UPPER   token produced by the lexer (see "Lexical tokens" below)
+     (* *)   comment
+
+   Indentation
+     The grammar uses three pseudo-tokens — NEWLINE, INDENT, DEDENT — produced
+     by a layout preprocessor (Haskell-style). Two-space indent is significant;
+     tabs are rejected by the lexer. The preprocessor closes any open INDENT
+     blocks at end of file with synthetic DEDENTs.
+
+   Whitespace and comments
+     Whitespace separates tokens. Line comments begin with '#' and run to
+     end of line. Block comments are '{-' ... '-}', which may nest. Comments
+     are stripped before this grammar applies. (Earlier drafts used '--'
+     for line comments; switched to '#' so the project follows the same
+     convention as Python / shell, and so the '#' glyph is exclusively a
+     comment marker — see the active-low signal note on IDENT below.)
+
+   This grammar targets LL(2) with one-token semantic-predicate lookahead at
+   `prefer` (abstract→concrete binding vs. soft constraint, see §13). It is
+   intended to be hand-implementable as a recursive-descent parser.
+   =========================================================================== *)
+
+
+(* --- Lexical tokens -------------------------------------------------------- *)
+
+(* Identifiers: letter or '_', then any of letter/digit/'_'.
+   The '#' glyph is *not* permitted in identifiers; it opens a comment.
+   Active-low signals use the trailing '_N' convention: 'CS_N', 'WP_N',
+   'HOLD_N', 'RESET_N'. (Earlier drafts allowed 'CS#' style; that is now
+   a lex error: '#' is comment-only.) *)
+IDENT             ::= /[A-Za-z_][A-Za-z0-9_]*/
+
+(* Integer and decimal numbers. SI-prefix shorthand ('10k', '2.2u') is
+   accepted only when immediately followed by a unit; bare numbers like
+   '1.5e-3' are also accepted. The lexer normalizes to a numeric value plus
+   an optional unit token. *)
+INT               ::= /-?[0-9]+/
+NUMBER            ::= /-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?/
+SI_PREFIX         ::= /[kKMGTmunp]/        (* 'k'/'K' kilo, 'M' mega, 'G' giga, 'T' tera,
+                                              'm' milli, 'u' micro, 'n' nano, 'p' pico.
+                                              Earlier drafts also accepted Greek micro and the
+                                              micro sign (Unicode U+03BC and U+00B5) for micro;
+                                              the language is now ASCII-only — 'u' is the sole
+                                              spelling. *)
+
+(* Unit tokens. Library-extensible; the core set is ASCII-typeable.
+   Note: there is *no* 'Ω' lexeme. Resistance values are written
+   without a unit symbol; the type system infers ohms from the
+   parameter or expression context (e.g. 'parameter R : resistance =
+   4.7 k' means 4.7 kΩ). The token 'Ohm' is accepted for the rare case
+   where unit algebra needs to be written explicitly in source. *)
+UNIT              ::= 'V' | 'A' | 'W' | 'Ohm' | 'F' | 'H' | 'Hz'
+                    | 's' | 'm' | '°C' | 'ppm' | '%'
+                    | UNIT '/' UNIT                  (* derived units *)
+
+(* QUANTITY allows three forms:
+     (a) NUMBER alone:         '10', '4.7'              (resistance contexts)
+     (b) NUMBER + SI prefix:   '10 k', '2.2 u'          (resistance contexts)
+     (c) NUMBER + (SI?) UNIT:  '10 kV', '2.2 uF', '3 V' (general)
+   Form (a) and (b) are only valid when a typed context implies a unit
+   (presently: 'resistance'-typed parameters). The lexer/parser pair
+   produces a value+unit tuple; in the (a)/(b) cases the unit is filled
+   in by the type checker. *)
+QUANTITY          ::= NUMBER (SI_PREFIX? UNIT?)?     (* '10', '10 k', '2.2 uF', '3.3 V' *)
+
+(* String literals. Double-quoted UTF-8; standard escape sequences. *)
+STRING            ::= '"' STRING_CHAR* '"'
+STRING_CHAR       ::= ? any UTF-8 char except '"' or '\' ?
+                    | '\' ESCAPE_CHAR
+ESCAPE_CHAR       ::= '"' | '\' | 'n' | 'r' | 't' | 'u' '{' /[0-9a-fA-F]+/ '}'
+
+(* Booleans, used in some library-defined parameter values. *)
+BOOL              ::= 'true' | 'false'
+
+(* Layout tokens, produced by the layout preprocessor. *)
+NEWLINE           ::= ? logical end-of-line ?
+INDENT            ::= ? two more spaces of indent than the enclosing block ?
+DEDENT            ::= ? matching close of an INDENT ?
+
+
+(* --- §1. File and top-level statements ------------------------------------ *)
+
+file              ::= top_stmt*
+
+top_stmt          ::= include_stmt
+                    | define_stmt
+                    | alias_stmt
+                    | prefer_stmt
+                    | designators_stmt
+                    | designators_lock_stmt
+                    | hint_stmt
+                    | constraint_stmt
+                    | generator_stmt
+                    | use_stmt
+                    | NEWLINE                         (* blank lines are skipped *)
+
+
+(* --- §2. include ---------------------------------------------------------- *)
+
+include_stmt      ::= 'include' STRING include_qual? NEWLINE
+include_qual      ::= 'as' IDENT
+                    | 'only' '{' ident_list '}'
+
+ident_list        ::= IDENT (',' IDENT)*
+
+
+(* --- §3. define ----------------------------------------------------------- *)
+
+define_stmt       ::= 'define' sigil_name parents? NEWLINE INDENT body DEDENT
+
+parents           ::= ':' sigil_name (',' sigil_name)*
+
+(* Sigil-bracketed names denote one of the three structural kinds. The
+   body grammar that follows depends on which sigil was used. The
+   former interface-sigil form `(IDENT)` is gone in this draft; the
+   former Interface kind has merged into Circuit (which keeps its
+   angle-bracket sigil), and round parentheses are reserved for
+   expression grouping. *)
+sigil_name        ::= sigil_comp | sigil_pkg | sigil_circuit
+sigil_comp        ::= '{' IDENT '}'
+sigil_pkg         ::= '[' IDENT ']'
+sigil_circuit     ::= '<' IDENT '>'
+
+
+(* --- §3.1. Body productions ----------------------------------------------- *)
+
+body              ::= body_stmt*
+
+(* Some body forms are valid only in some kinds (see docs/03-syntax.md §2.1).
+   The grammar accepts the union; the static checker enforces per-kind
+   admissibility. *)
+body_stmt         ::= pin
+                    | parameter
+                    | package_binding
+                    | view
+                    | lane
+                    | role
+                    | port
+                    | bus_decl
+                    | bank_decl
+                    | provides_decl
+                    | instance
+                    | connect
+                    | splice_stmt
+                    | constraint_stmt
+                    | generator_stmt
+                    | description
+                    | designator_prefix
+                    | swap_group
+                    | alias_stmt
+                    | hint_stmt
+                    | derive_stmt
+                    | resolution_stmt
+                    | port_prefer_stmt
+                    | prefer_stmt
+                    | override_stmt
+                    | remove_stmt
+                    | net_label
+                    | NEWLINE
+
+
+(* --- §3.2. Inheritance — override and remove ------------------------------ *)
+
+override_stmt     ::= 'override' body_stmt
+
+remove_stmt       ::= 'remove' remove_target NEWLINE
+remove_target     ::= 'pin'        IDENT
+                    | 'parameter'  IDENT
+                    | 'lane'       IDENT
+                    | 'role'       IDENT
+                    | 'port'       IDENT
+                    | 'instance'   IDENT
+                    | 'view'       sigil_circuit IDENT?
+                    | 'constraint' IDENT
+                    | 'package'    sigil_pkg
+                    | 'bus'        IDENT
+                    | 'bank'       IDENT
+                    | 'provides'   sigil_circuit 'as' role_name
+                    | 'splice'     IDENT
+                    | 'hint'       IDENT hint_targets?
+                    | 'derive'     IDENT
+                    | 'resolution'
+                    | 'parent'     sigil_name ('.' remove_target)?
+
+
+(* --- §4. Components ------------------------------------------------------- *)
+
+description       ::= 'description' STRING NEWLINE
+designator_prefix ::= 'designator_prefix' IDENT NEWLINE
+
+(* Package binding inside a component body: indented block of pin
+   declarations and optional swap groups. *)
+package_binding   ::= sigil_pkg NEWLINE INDENT (pin | swap_group)+ DEDENT
+
+pin               ::= 'pin' pin_id IDENT IDENT* pin_role? param_block? NEWLINE
+pin_id            ::= INT                              (* required when inside a package_binding *)
+                    | (* empty *)                      (* permitted in package definitions *)
+pin_role          ::= 'role' role_kind
+role_kind         ::= 'power_in' | 'power_out' | 'ground'
+                    | 'analog_in' | 'analog_out'
+                    | 'digital_in' | 'digital_out' | 'digital_io'
+                    | 'passive' | 'nc'
+
+(* Per-pin or per-block parameter sub-block. *)
+param_block       ::= NEWLINE INDENT (parameter | constraint_stmt)+ DEDENT
+
+(* Swap group: pins or pin-numbers that may be permuted by the elaborator. *)
+swap_group        ::= 'swap_group' '{' (IDENT | INT) (',' (IDENT | INT))* '}' NEWLINE
+
+(* Circuit view: name optional (defaults to lowercased circuit name). *)
+view              ::= 'view' sigil_circuit 'as' role_name view_name? NEWLINE
+                      INDENT view_mapping+ DEDENT
+role_name         ::= IDENT
+view_name         ::= IDENT
+view_mapping      ::= IDENT IDENT NEWLINE             (* lane_name pin_or_lane *)
+
+
+(* --- §5. Packages --------------------------------------------------------- *)
+
+(* Package bodies use a small library DSL for pad geometry that is OUT of
+   scope for the core language. Only the structural productions that
+   participate in elaboration appear here. *)
+pkg_body_stmt     ::= 'pin' INT pad_block? NEWLINE
+                    | swap_group
+                    | NEWLINE
+pad_block         ::= NEWLINE INDENT pad_stmt+ DEDENT
+pad_stmt          ::= IDENT (pad_arg)* NEWLINE        (* library-defined; opaque here *)
+pad_arg           ::= QUANTITY | NUMBER | IDENT | STRING
+
+
+(* --- §6. Circuits — lanes, roles, ports, splicing ------------------------- *)
+
+(* The Circuit kind unifies what older drafts split into Interface and
+   Module. A circuit body may declare any of: lanes (`lane`), role
+   tables (`role`), typed ports (`port`), internal instances
+   (`instance`), connections (`connect`), and series-insertion splices
+   (`splice_stmt`). The flavor of a circuit (protocol contract,
+   wrapper, implementation) is determined by which of these its body
+   exercises; the grammar admits all of them in one body. *)
+
+lane              ::= 'lane' IDENT ':' type_expr NEWLINE
+
+role              ::= 'role' IDENT role_extend? NEWLINE
+                      INDENT role_body_stmt+ DEDENT
+role_extend       ::= 'extends' sigil_circuit '.' IDENT
+role_body_stmt    ::= direction_set
+                    | cardinality_stmt
+                    | derive_stmt
+                    | port_prefer_stmt
+                    | NEWLINE
+direction_set     ::= ('drives' | 'receives' | 'bidir') '{' ident_list '}' NEWLINE
+cardinality_stmt  ::= 'cardinality' cardinality_form NEWLINE
+cardinality_form  ::= '=' (INT | '*')
+                    | '>=' INT
+                    | '<=' INT
+                    | 'in' '[' INT ',' INT ']'
+
+(* `derive` publishes an attribute (port-name or parameter-name) that the
+   elaborator turns into an equality constraint when the carrying port
+   joins a bus instance. The right-hand side is a path expression
+   evaluated in the port's scope. See docs/02-semantic-model.md §3.1.1
+   and docs/03-syntax.md §4.1.2. *)
+derive_stmt       ::= 'derive' IDENT '=' path NEWLINE
+
+(* `resolution` defines a soft-weighted wrapper choice for a protocol
+   circuit's bus instances. Cases use quantifiers over participants'
+   `prefer wrapper = …` declarations. See docs/02-semantic-model.md
+   §3.5.1 and docs/03-syntax.md §4.1.4. *)
+resolution_stmt   ::= 'resolution' NEWLINE
+                      INDENT resolution_case+ DEDENT
+resolution_case   ::= 'case' resolution_pred '=>' sigil_name call_args?
+                        ('weight' INT)? NEWLINE
+                    | 'default' '=>' sigil_name call_args?
+                        ('weight' INT)? NEWLINE
+                    | NEWLINE
+resolution_pred   ::= ('any' | 'all' | 'none') '(' 'prefers' sigil_name ')'
+                    | 'count' '(' 'prefers' sigil_name ')' comp_op INT
+
+(* `prefer wrapper = <X>` in a port body or `bus`-port body declares a
+   soft preference contributing to the wrapper-choice variable for the
+   bus instance the port joins. Default weight = 5. See
+   docs/03-syntax.md §4.1.3. *)
+port_prefer_stmt  ::= 'prefer' 'wrapper' '=' sigil_name call_args?
+                      ('weight' INT)? NEWLINE
+
+
+(* --- §7. Circuit bodies — ports, instances, connections, splicing --------- *)
+
+port              ::= 'port' ident_list ':' sigil_circuit 'as' role_name NEWLINE
+
+(* `bus` (in component bodies) declares a peripheral instance with one or
+   more candidate alternate-function bank assignments. *)
+bus_decl          ::= 'bus' IDENT ':' sigil_circuit 'as' role_name NEWLINE
+                      INDENT bank_assignment+ DEDENT
+bank_assignment   ::= 'bank' IDENT '{' lane_pin_map (',' lane_pin_map)* '}' NEWLINE
+lane_pin_map      ::= IDENT '=' IDENT                  (* lane_name = pin_name *)
+
+(* `bank` (in component bodies) declares an electrical bank with shared
+   pins and aggregate constraints. *)
+bank_decl         ::= 'bank' IDENT NEWLINE
+                      INDENT bank_body_stmt+ DEDENT
+bank_body_stmt    ::= 'pins' '{' ident_list '}' NEWLINE
+                    | parameter
+                    | constraint_stmt
+                    | NEWLINE
+
+(* `provides` (in component bodies) declares a *capability*: this
+   component can supply zero-or-more buses of the named circuit type
+   and role on demand. Lanes are allocated by the elaborator from the
+   named pool, subject to the per-bus and trailing where-clauses. Each
+   `<comp>.<lowercase_circuit>.<name>` reference at the board level
+   creates a fresh allocation; pool-disjointness across allocations is
+   enforced as a linear-resource obligation. See docs/02-semantic-model.md
+   §2.6 and docs/03-syntax.md §3.4. *)
+provides_decl     ::= 'provides' sigil_circuit 'as' role_name NEWLINE
+                      INDENT pool_clause per_bus_clause DEDENT
+
+pool_clause       ::= 'pool' filter_expr NEWLINE
+filter_expr       ::= path ('where' expr)?
+
+per_bus_clause    ::= 'per_bus' NEWLINE
+                      INDENT lane_candidate+ where_clause* DEDENT
+lane_candidate    ::= IDENT 'in' 'pool' NEWLINE
+where_clause      ::= 'where' expr NEWLINE
+
+(* Circuit-level instance declaration. Components and circuits can be
+   instantiated. The optional indented sub-block carries parameter
+   overrides, designator overrides, etc. *)
+instance          ::= IDENT '=' sigil_name call_args? designator_inline?
+                      instance_body? NEWLINE
+designator_inline ::= '@' IDENT
+instance_body     ::= NEWLINE INDENT instance_field+ DEDENT
+instance_field    ::= 'designator' IDENT NEWLINE
+                    | parameter
+                    | description
+                    | hint_stmt
+                    | NEWLINE
+
+call_args         ::= '(' (call_arg (',' call_arg)*)? ')'
+call_arg          ::= IDENT '=' arg_value
+                    | arg_value
+arg_value         ::= QUANTITY | NUMBER | STRING | BOOL
+                    | sigil_name | path | range_lit
+
+
+(* --- §8. Connections and splicing ----------------------------------------- *)
+
+(* A connection statement may carry an indented argument block that
+   overrides parameters and port bindings on the bus instance the
+   `<->` joins. Multiple `<->` lines on the same bus name accumulate
+   their argument-block contents; conflicting same-name entries are
+   UNSAT unless one is marked `override`. See docs/03-syntax.md §6.4. *)
+connect           ::= connect_term '<->' connect_term connect_args? NEWLINE
+
+connect_args      ::= NEWLINE INDENT connect_arg+ DEDENT
+connect_arg       ::= 'parameter' IDENT '=' arg_value NEWLINE
+                    | 'prefer' sigil_name '=' sigil_name call_args? NEWLINE  (* wrapper override *)
+                    | 'prefer' 'wrapper' '=' sigil_name call_args? NEWLINE   (* wrapper override (shorthand) *)
+                    | 'pin'        IDENT '=' path NEWLINE                     (* hard pin equality *)
+                    | 'pin_prefer' IDENT '=' path NEWLINE                     (* soft pin preference *)
+                    | 'derive'     IDENT '=' path NEWLINE                     (* derive equality at this site *)
+                    | 'hint'       IDENT hint_text? hint_block? NEWLINE       (* hint on the bus instance *)
+                    | 'override'   connect_arg                                 (* override a same-named entry from another connect site *)
+                    | IDENT '=' path NEWLINE                                   (* bind wrapper non-lane port (e.g. vref) *)
+                    | NEWLINE
+
+connect_term      ::= path
+                    | lane_endpoint
+                    | net_label_use
+                    | set_literal
+
+(* Lane endpoints are visible inside a wrapper circuit's body. For each
+   lane L declared by the wrapper, the body sees `L.host_side` and
+   `L.peri_side` as the two implicit endpoints of L. By default, the
+   elaborator wires `L.host_side <-> L.peri_side` for every lane (the
+   wrapper is a wire-through). Any explicit reference to either side
+   suppresses that default for that lane. *)
+lane_endpoint     ::= IDENT '.' ('host_side' | 'peri_side')
+
+(* `splice <lane> with <component>` is sugar for series insertion of a
+   two-terminal component on a wrapper-circuit's lane. It expands to:
+       <lane>.host_side <-> <component>.T1
+       <component>.T2   <-> <lane>.peri_side
+   with the default through-wire on <lane> suppressed. <component>
+   must resolve to an instance whose type exposes the conventional
+   two-terminal pin names `T1` and `T2`. For non-conventional cases,
+   write the explicit endpoint references instead. *)
+splice_stmt       ::= 'splice' IDENT 'with' path NEWLINE
+
+(* A net label use refers to a previously- or simultaneously-introduced
+   labeled net. Net labels start with 'NET_' by convention (warning, not
+   error) and are SCREAMING_SNAKE_CASE per the style guide. *)
+net_label_use     ::= IDENT
+
+(* `NET_FOO = path` introduces a label on a net. *)
+net_label         ::= IDENT '=' path NEWLINE
+
+(* `{ a, b, c } <-> rhs` connects each member to the right-hand side. *)
+set_literal       ::= '{' connect_term (',' connect_term)* '}'
+
+
+(* --- §9. Parameters and types --------------------------------------------- *)
+
+(* A `parameter` declaration registers a constraint variable in the
+   elaboration store. A parameter may carry an optional *domain
+   clause* (narrows the legal values) and an optional *default
+   clause* (a nominal value, with optional tolerance). Both are
+   independent: a parameter can declare a domain, a default, both,
+   or neither.
+
+   * Domain only       — `parameter Vio : voltage in {1.8 V, 2.5 V, 3.3 V}`
+   * Default only      — `parameter R_pu : resistance = 4.7 k`
+   * Domain + default  — `parameter R_pu : resistance in [1 k, 100 k] = 4.7 k +/- 1 %`
+   * Neither           — `parameter Vio : voltage` (free variable, expecting a
+                        bind from `derive`, connect-site, or another
+                        constraint)
+
+   The default clause may carry a tolerance (`+/-` or asymmetric/one-
+   sided form, see param_tol below) which makes the variable
+   interval-valued. The optional indented domain block is equivalent
+   to `in {...}`. See docs/02-semantic-model.md §5 / §5.1 / §12.1
+   and docs/03-syntax.md §7.1 / §7.1.1. *)
+parameter         ::= 'parameter' IDENT (':' type_expr)?
+                      domain_clause? default_clause?
+                      param_domain_block? NEWLINE
+domain_clause     ::= 'in' range_or_set
+                    | '<=' arg_value
+                    | '>=' arg_value
+                    | '<'  arg_value
+                    | '>'  arg_value
+default_clause    ::= '=' arg_value param_tol?
+(* Backward-compatibility alias: older drafts called the union of
+   domain and default 'param_value'. References to it should be read
+   as 'domain_clause? default_clause?' under the new split. *)
+param_value       ::= domain_clause | default_clause
+range_or_set      ::= range_lit
+                    | '{' arg_value (',' arg_value)* '}'
+param_domain_block::= NEWLINE INDENT 'domain' '{' arg_value (',' arg_value)* '}' DEDENT
+(* Tolerance follows the nominal value. A tolerance clause makes the
+   parameter *interval-valued*: it has Vnom, Vlo, Vhi rather than a single
+   point. Three syntactic forms — symmetric, asymmetric/two-sided, and
+   one-sided — and free mixing of percent and absolute amounts. The parser
+   accepts the sides in any order; each side may appear at most once. *)
+param_tol         ::= sym_tol
+                    | asym_tol
+                    (* Examples (all valid):
+                         +/- 1 %                 (sym percent)
+                         +- 100 mV               (sym absolute, alias spelling)
+                         + 5 %, - 1 %            (asymmetric percent)
+                         + 0.1 V, - 0.05 V       (asymmetric absolute)
+                         + 5 %                   (one-sided up; Vlo == Vnom)
+                         - 0.1 V                 (one-sided down; Vhi == Vnom)
+                         + 5 %, - 0.1 V          (mixed kinds across sides)
+                       Earlier drafts used the Unicode '±' (U+00B1); the
+                       language is ASCII-only — '+/-' is the canonical
+                       symmetric spelling, '+-' is accepted as a shorthand. *)
+sym_tol           ::= ('+/-' | '+-') tol_amount
+asym_tol          ::= tol_side (',' tol_side)*       (* at most one '+' and one '-' *)
+tol_side          ::= '+' tol_amount                  (* upper-bound contribution *)
+                    | '-' tol_amount                  (* lower-bound contribution *)
+tol_amount        ::= NUMBER '%'                      (* percent of nominal *)
+                    | QUANTITY                        (* absolute, any unit-typed value *)
+
+(* The standard scalar types (extensible by libraries). *)
+type_expr         ::= 'voltage' | 'current' | 'resistance' | 'capacitance'
+                    | 'inductance' | 'power' | 'frequency' | 'time'
+                    | 'temperature' | 'temperature_range'
+                    | 'percent' | 'count' | 'dimensionless'
+                    | 'string' | 'bool'
+                    | 'analog' | 'digital' | 'power'              (* signal types *)
+                    | sigil_circuit                                    (* refinement-typed *)
+                    | sigil_name                                    (* `kind` constraint *)
+                    | type_expr '[' INT ']'                         (* fixed-length array *)
+
+(* A range literal: 'lo .. hi' or '[lo, hi]'. *)
+range_lit         ::= arg_value '..' arg_value
+                    | '[' arg_value ',' arg_value ']'
+
+
+(* --- §10. Constraints ----------------------------------------------------- *)
+
+(* A `constraint` posts a hard predicate to the constraint store.
+   With a trailing `soft <weight>`, it posts a soft predicate (the
+   solver maximizes the sum of satisfied soft weights). See
+   docs/02-semantic-model.md §6 and §12.3, docs/03-syntax.md §7.2.
+
+   Interval-valued operands. Many physical quantities (rail voltages,
+   tolerance-bearing parameters, net voltages aggregated from rails)
+   are *interval-valued*: they carry .Vnom, .Vlo, .Vhi rather than a
+   single point. When `in` (form `add_expr 'in' range_lit`) appears
+   with at least one interval-valued operand, the surface predicate
+   desugars to interval *containment*:
+
+       x in [lo, hi]
+         desugars to:
+           lo <= x.Vlo  AND  x.Vhi <= hi   (when x is interval-valued)
+           lo <= x      AND  x      <= hi   (when x is point-valued)
+
+   Engineers may always reach for the bounds explicitly via field
+   access: `x.Vlo`, `x.Vhi`, `x.Vnom`. See docs/02-semantic-model.md
+   §5.1 (interval-valued variables) and §6.1 (containment semantics
+   of `in`). *)
+constraint_stmt   ::= 'constraint' constraint_form constraint_strength? NEWLINE
+
+constraint_form   ::= constraint_name? expr
+                    | 'over' set_comp '{' expr '}'
+                    | sigil_circuit call_args                       (* invokes a check circuit *)
+
+constraint_name   ::= IDENT ':'
+
+constraint_strength ::= 'soft' INT
+
+(* Set comprehension for `over { p in path } { ... }` style aggregates. *)
+set_comp          ::= '{' IDENT 'in' path '}'
+
+(* Expressions used inside constraints. Parsed with conventional precedence
+   (logical < comparison < additive < multiplicative < power < unary < primary).
+   The grammar below captures the alternation set; precedence is enforced in
+   the parser. *)
+expr              ::= or_expr
+or_expr           ::= and_expr ('or' and_expr)*
+and_expr          ::= not_expr ('and' not_expr)*
+not_expr          ::= 'not' not_expr | comp_expr
+comp_expr         ::= add_expr (comp_op add_expr)*
+                    | add_expr 'in' range_lit
+                    | quant_expr
+comp_op           ::= '==' | '!=' | '<=' | '>=' | '<' | '>'
+quant_expr        ::= 'exists' IDENT ':' sigil_name '.' expr
+                    | 'forall' IDENT ':' sigil_name '.' expr
+add_expr          ::= mul_expr (('+' | '-') mul_expr)*
+mul_expr          ::= pow_expr (('*' | '/') pow_expr)*
+pow_expr          ::= unary_expr ('^' unary_expr)*
+unary_expr        ::= '-' unary_expr | primary
+primary           ::= QUANTITY
+                    | NUMBER
+                    | STRING
+                    | BOOL
+                    | aggregate_call
+                    | function_call
+                    | path
+                    | range_lit
+                    | '(' expr ')'
+
+aggregate_call    ::= ('sum' | 'max' | 'min' | 'count' | 'avg')
+                      '(' expr_or_set ')'
+expr_or_set       ::= expr | set_comp_inline
+set_comp_inline   ::= IDENT 'in' path                              (* `p in mcu.bank_A.pins` *)
+
+(* User- or library-defined predicates and functions. *)
+function_call     ::= IDENT '(' (expr (',' expr)*)? ')'
+
+
+(* --- §11. Generators ------------------------------------------------------ *)
+
+generator_stmt    ::= 'generate' generator_form
+
+generator_form    ::= 'for' generator_for NEWLINE INDENT body DEDENT
+                    | 'if'  expr NEWLINE INDENT body DEDENT ('else' NEWLINE INDENT body DEDENT)?
+                    | 'match' path NEWLINE INDENT generator_case+ DEDENT
+
+generator_for     ::= IDENT 'in' for_range
+for_range         ::= range_lit
+                    | path
+                    | '{' arg_value (',' arg_value)* '}'
+
+generator_case    ::= 'case' case_pattern ':' NEWLINE INDENT body DEDENT
+case_pattern      ::= sigil_name | path | arg_value
+
+
+(* --- §12. Aliases --------------------------------------------------------- *)
+
+alias_stmt        ::= 'alias' sigil_name '=' alias_rhs alias_where? NEWLINE
+alias_rhs         ::= sigil_name call_args?
+alias_where       ::= 'where' expr
+
+
+(* --- §13. Project preferences (`prefer`) ---------------------------------- *)
+
+(* Two grammatical uses of the keyword `prefer`:
+     (a) abstract→concrete binding: 'prefer' sigil_name '=' sigil_name
+     (b) soft constraint:           'prefer' expr
+   The parser disambiguates by looking at whether the first non-whitespace
+   token after 'prefer' is a sigil-bracketed name (then form (a)) or
+   anything else (form (b)).
+
+   Form (a) is used uniformly across kinds:
+     prefer {RESISTOR} = {ERJ-PHF}                 (component vendor binding)
+     prefer <I2C>      = <i2c_link>                (circuit wrapper binding)
+     prefer <SPI>      = <spi_with_termination>(R_term = 22)
+   The static checker requires the right-hand side's kind and parameter
+   contract to match the left-hand side's. See docs/03-syntax.md §11
+   and docs/02-semantic-model.md §9.1 for resolution semantics. *)
+(* `prefer` has three grammatical uses:
+     (a) abstract→concrete binding: 'prefer' sigil_name '=' sigil_name call_args?
+         Default is HARD (priority above soft); add 'soft INT' to make it soft.
+     (b) wrapper preference (port-body shorthand): 'prefer wrapper = …' (see port_prefer_stmt).
+     (c) soft constraint:          'prefer' expr ('soft' INT)?
+   The parser disambiguates by looking at whether the first non-whitespace
+   token after 'prefer' is 'wrapper' (form b), a sigil-bracketed name
+   (form a), or anything else (form c). See docs/02-semantic-model.md §3.5
+   for the cross-participant resolution machinery on bus instances. *)
+prefer_stmt       ::= 'prefer' (prefer_bind | port_prefer_inline | prefer_soft) NEWLINE
+prefer_bind       ::= sigil_name '=' sigil_name call_args? ('soft' INT)?
+port_prefer_inline ::= 'wrapper' '=' sigil_name call_args? ('weight' INT)?
+prefer_soft       ::= expr ('soft' INT)?
+
+
+(* --- §14. Designator management ------------------------------------------- *)
+
+designators_stmt  ::= 'designators' NEWLINE INDENT designator_rule+ DEDENT
+designator_rule   ::= 'start_at' IDENT '=' INT NEWLINE
+                    | 'reserve'  IDENT '=' '{' int_or_range_list '}' NEWLINE
+                    | 'prefix'   IDENT '=' IDENT NEWLINE
+
+int_or_range      ::= INT | INT '..' INT
+int_or_range_list ::= int_or_range (',' int_or_range)*
+
+designators_lock_stmt
+                  ::= 'designators_lock' sigil_circuit NEWLINE
+                      INDENT lock_binding+ DEDENT
+lock_binding      ::= IDENT '=' path NEWLINE
+
+
+(* --- §15. Hints ----------------------------------------------------------- *)
+
+(* A hint attaches typed, machine-readable design intent to one or more
+   elaborated objects. It may appear at top level, in any define-body, or
+   as an instance_field. The semantic story is in docs/02-semantic-model.md
+   §7.5; the standard kinds and arg conventions are catalogued in
+   docs/05-naming-conventions.md §7. Unknown kinds are passed through to
+   downstream tools without error. *)
+hint_stmt         ::= 'hint' IDENT hint_targets? hint_text? hint_block? NEWLINE
+
+(* Targets: one or more paths, sigil-bracketed type references, or set
+   literals. Omitted when the hint's enclosing context supplies the target
+   implicitly (e.g. inside an instance_body, the target is the instance). *)
+hint_targets      ::= hint_target (',' hint_target)*
+hint_target       ::= path
+                    | sigil_name
+                    | set_literal
+
+(* The trailing string is the free-text payload — same role as a `text`
+   key in the indented block form. *)
+hint_text         ::= STRING
+
+(* Indented block of structured key/value pairs. Library-defined kinds
+   declare which keys they understand; unknown keys are passed through. *)
+hint_block        ::= NEWLINE INDENT hint_attr+ DEDENT
+hint_attr         ::= IDENT arg_value NEWLINE
+                    | NEWLINE
+
+
+(* --- §16. Top-level constraint and use ------------------------------------ *)
+
+(* A constraint or generator may also appear at top level for project-wide
+   checks (see Recipe 10 in docs/04-cookbook.md). The body forms reuse the
+   in-body productions above. *)
+
+(* `use` is the netlist entry point. Legal exactly once per board file,
+   absent in library files. *)
+use_stmt          ::= 'use' sigil_circuit call_args? NEWLINE
+
+
+(* --- §17. Paths and identifiers ------------------------------------------- *)
+
+(* A path is a dotted/indexed reference into the elaborated tree.
+   '.<NAME>' selects a circuit view by its circuit type. *)
+path              ::= IDENT path_segment*
+path_segment      ::= '.' IDENT
+                    | '.' sigil_circuit
+                    | '[' index_expr ']'
+index_expr        ::= INT | IDENT | range_lit
+
+
+(* --- §18. Escape hatches (recipes section) -------------------------------- *)
+
+(* `raw_pin <N>` lets a circuit body reference a package pin by
+   number, bypassing logical pin names. Use sparingly. *)
+raw_pin_ref       ::= 'raw_pin' INT
+
+(* `assume <expr>` asserts a predicate without proof; appears in build
+   reports as a deferred obligation. *)
+assume_stmt       ::= 'assume' expr NEWLINE
+
+
+(* ===========================================================================
+   End of grammar.
+
+   Notes for implementers
+   ----------------------
+   * Layout: implement INDENT/DEDENT/NEWLINE as a preprocessing pass over a
+     stream of (TOKEN, line, col) triples. Two-space indent is significant;
+     mixed tabs/spaces are an error.
+   * Identifier lookup: separate namespaces by sigil — '{T}', '[T]',
+     and '<T>' may all coexist with the same IDENT 'T'. Bare IDENT in an
+     expression position refers to an instance, parameter, lane, or port
+     resolved by lexical scope.
+   * Static admissibility: the grammar accepts the union of body productions
+     for all kinds. The semantic checker rejects (e.g.) `lane` inside a
+     component body. See docs/03-syntax.md §2.1 for the per-kind table.
+  * Two of the keywords are overloaded grammatically:
+      - `bank` is both a component-body declarator and the leading token
+        of a `bank_assignment` inside a `bus_decl`. Disambiguated by
+        enclosing block.
+      - `prefer` accepts:
+          (a) abstract→concrete binding (`prefer {A} = {C}`, `prefer <I> = <W>`)
+          (b) port-body shorthand (`prefer wrapper = <X> [weight INT]`)
+          (c) soft constraint (`prefer expr [soft INT]`)
+        Disambiguated by the first token after `prefer`.
+  * Three keywords are new in the constraint-driven draft:
+      - `cardinality`: appears only inside a `role` body.
+      - `derive`: appears in role bodies and `bus`-port bodies.
+      - `resolution`: appears in protocol-circuit bodies.
+  * The `connect_args` block is the only place where indented IDENT='='path
+    lines parse as wrapper-port bindings; outside that block, the same
+    syntactic shape would be a net-label introduction.
+  * Targeted complexity: the grammar is intentionally LL(2). The parser
+    only needs one-token lookahead in the common case, and two tokens
+    for the `prefer`-form choice, the `param_value` choice, and for
+    distinguishing `IDENT '=' …` (instance / net label) from a bare
+    expression.
+   =========================================================================== *)

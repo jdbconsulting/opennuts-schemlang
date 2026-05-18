@@ -1,0 +1,45 @@
+# std/uart.schemlang
+#
+# UART (asynchronous serial) protocol circuit. Demonstrates a strict
+# point-to-point protocol with N-ary roles defaulting to
+# cardinality = 1 on both sides.
+#
+# Hardware flow control (RTS/CTS) lives in a refinement <UART_FC> that
+# inherits <UART> and adds two more lanes. Most boards don't use it.
+#
+# UART has no protocol-required external components, so there is no
+# standard wrapper. Boards that want one (level-shift, isolation) bind
+# a project-local wrapper via `prefer <UART> = <my_uart_link>`.
+
+define <UART>
+  lane TX : digital
+  lane RX : digital
+
+  role host
+    cardinality = 1
+    drives    { TX }
+    receives  { RX }
+    # Publish each side's bank Vio for any wrapper that may want to
+    # check rail compatibility.
+    derive Vio = bank(TX).Vio
+
+  role peripheral
+    cardinality = 1
+    receives  { TX }
+    drives    { RX }
+    derive Vio = supply.Vio
+
+
+define <UART_FC> : <UART>
+  # Hardware flow control: RTS is "request to send" (host out),
+  # CTS is "clear to send" (host in). The convention here matches
+  # DCE-style endpoints; a DTE peripheral inverts the role.
+  lane RTS : digital
+  lane CTS : digital
+
+  role host extends <UART>.host
+    drives    { RTS }
+    receives  { CTS }
+  role peripheral extends <UART>.peripheral
+    receives  { RTS }
+    drives    { CTS }

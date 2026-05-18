@@ -1,0 +1,105 @@
+# std/spi.schemlang
+#
+# SPI family of bus circuits and a conditional source-termination
+# wrapper. Demonstrates protocol-flavored circuits with N-ary roles
+# (cardinality = 1 on both sides for plain SPI; multi-target SPI
+# inherits and bumps the peripheral cardinality).
+#
+# A wrapper-flavored circuit (<spi_with_termination>) inherits the
+# protocol and conditionally splices source-terminating resistors
+# based on electrical-length thresholds. The threshold inputs
+# (trace_length, f_max, edge_rate) are constraint variables; if
+# they're unbound at solve time the splice generators degenerate
+# to no-ops and the unbound variables go to the residual.
+
+include "std/passives.schemlang"
+
+
+define <SPI>
+  lane CS_N   : digital
+  lane CLK   : digital
+  lane MOSI  : digital
+  lane MISO  : digital
+
+  role host
+    cardinality = 1
+    drives    { CS_N, CLK, MOSI }
+    receives  { MISO }
+
+  role peripheral
+    cardinality = 1
+    receives  { CS_N, CLK, MOSI }
+    drives    { MISO }
+
+
+# Multi-target SPI: one host can address multiple peripherals through
+# distinct CS_N lines. Modeled here by widening the peripheral role's
+# cardinality. (A real multi-target wrapper splits CS_N per peripheral;
+# left as an exercise for the standard library to add when needed.)
+define <MULTI_TARGET_SPI> : <SPI>
+  override role peripheral
+    cardinality >= 1
+    receives  { CLK, MOSI }     # shared
+    drives    { MISO }           # shared (typically tristate)
+    bidir     { CS_N }            # per-peripheral CS_N in real wrappers
+
+
+define <QSPI> : <SPI>
+  # In QSPI mode, MOSI/MISO of the parent SPI are reused as IO0/IO1
+  # and two new lines IO2/IO3 are added.
+  lane IO0   : digital
+  lane IO1   : digital
+  lane IO2   : digital
+  lane IO3   : digital
+
+  alias MOSI = IO0
+  alias MISO = IO1
+
+  role host extends <SPI>.host
+    bidir     { IO0, IO1, IO2, IO3 }
+  role peripheral extends <SPI>.peripheral
+    bidir     { IO0, IO1, IO2, IO3 }
+
+
+define <OCTOSPI> : <QSPI>
+  lane IO4   : digital
+  lane IO5   : digital
+  lane IO6   : digital
+  lane IO7   : digital
+
+  role host extends <QSPI>.host
+    bidir     { IO4, IO5, IO6, IO7 }
+  role peripheral extends <QSPI>.peripheral
+    bidir     { IO4, IO5, IO6, IO7 }
+
+
+# Wrapper: source-terminate the host-driven lanes when the trace is
+# electrically long. A direct `<-> ` between two <SPI> ports under
+# `prefer <SPI> = <spi_with_termination>` threads through this wrapper
+# automatically; trace_length and f_max are passed at the connect site
+# via the connect-site argument block (docs/03-syntax.md section 6.4).
+#
+# elec_len is a derived parameter (a constraint variable bound by an
+# equality to the formula). When trace_length and f_max are concrete
+# the threshold check fires; when either is left unbound, the
+# generator's predicate cannot be evaluated and the splices are
+# emitted to the residual as conditional structure for downstream
+# decision.
+define <spi_with_termination> : <SPI>
+  parameter trace_length : length    in [0 mm, 1 m]   = 0 mm
+  parameter f_max        : frequency in [10 kHz, 1 GHz] = 10 MHz
+  parameter velocity     : dimensionless = 0.6        # of c, FR-4 inner layer
+  parameter Z0           : resistance     = 50
+  parameter R_term       : resistance     = 22
+
+  parameter elec_len     : dimensionless
+  constraint elec_len == trace_length * f_max / (velocity * speed_of_light)
+
+  generate if elec_len > 0.1
+    R_clk  = {RESISTOR}(R = R_term)
+    R_mosi = {RESISTOR}(R = R_term)
+    R_cs   = {RESISTOR}(R = R_term)
+
+    splice CLK   with R_clk
+    splice MOSI  with R_mosi
+    splice CS_N   with R_cs
